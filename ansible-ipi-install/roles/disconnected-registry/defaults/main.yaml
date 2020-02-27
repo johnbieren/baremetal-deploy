@@ -1,0 +1,10 @@
+caching_dir: /opt/cached_disconnected_images
+cluster_domain: "{{ cluster }}.{{ domain }}"
+registry_dir: /opt/registry
+registry_port: 5000
+registry_user: kni
+registry_pass: kni-pass
+pullsecret_file:  "{{ ansible_user_dir }}/clusterconfigs/pull-secret.txt"
+registry_pull_secret_file: "{{ ansible_user_dir }}/private-mirror-secret.json"
+combined_pull_secret_file: "{{ ansible_user_dir }}/combined-secret.json"
+mirror_log: /tmp/tmp_image_mirror-{{ openshift_version }}.log

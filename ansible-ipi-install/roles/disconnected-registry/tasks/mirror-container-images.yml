@@ -1,0 +1,43 @@
+---
+- name: ensure stale auth_file is removed
+  file:
+    path: "{{ registry_pull_secret_file }}"
+    state: absent
+
+- name: create registry login file
+  become: true
+  shell: |
+    podman login --authfile {{ registry_pull_secret_file }} \
+        -u {{ registry_user }} -p {{ registry_pass }} \
+        registry.{{ cluster_domain }}:{{ registry_port }}
+
+- name: read private registry authfile
+  command: cat {{ registry_pull_secret_file }}
+  register: private_registry_secret
+
+- name: create combined pull secret
+  shell: |
+    jq -s '.[0] * .[1]' {{ pull_secret_file }} \
+        {{ registry_pull_secret_file }} | tee {{ combined_pull_secret_file }}
+
+- name: mirror images
+  shell: |
+    set -euxo pipefail
+    oc adm release mirror \
+        --insecure=true \
+        -a {{ combined_pull_secret_file }} \
+        --from {{ openshift_release_image_url }} \
+        --to-release-image registry.{{ cluster_domain }}:{{ registry_port }}/localimages/local-release-image:{{ openshift_version }} \
+        --to registry.{{ cluster_domain }}:{{ registry_port }}/localimages/local-release-image 2>&1 | tee {{ mirror_log }}
+
+- name: fetch private registry secret
+  fetch:
+    src: "{{ registry_pull_secret_file }}"
+    dest: private-mirror-secret.json
+    flat: true
+
+- name: fetch mirror log output
+  fetch:
+    src: "{{ mirror_log }}"
+    dest: oc_adm_mirror.log
+    flat: true

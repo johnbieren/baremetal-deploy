@@ -1,0 +1,63 @@
+- name: create cache directory {{ caching_dir }}
+  become: true
+  file:
+    path: "{{ caching_dir }}"
+    owner: "{{ ansible_user_dir }}"
+    group: "{{ ansible_user_dir }}"
+    mode: 0755
+    setype: httpd_sys_content_t
+    state: directory
+
+- name: manage image
+  include_tasks: manage_os_image.yml
+  loop:
+    - 'machine_os_installer'
+    - 'machine_os_installer_bootstrap'
+  loop_control:
+    loop_var: img_prefix
+
+- name: remove any running image-cache container
+  become: true
+  shell: |
+    podman rm image-cache -f || true
+
+- name: Copy apache.conf
+  copy:
+    src: apache.conf
+    dest: "{{ caching_dir }}/apache.conf"
+
+- name: start registry container
+  become: true
+  shell: |
+    podman run -d --net host --name image-cache \
+      -v {{ caching_dir }}:/usr/local/apache2/htdocs/images/:ro,z \
+      -v {{ caching_dir }}/apache.conf:/usr/local/apache2/conf/httpd.conf \
+      docker.io/httpd:latest
+
+- name: assert firewalld status
+  become: true
+  command: firewall-cmd --state
+  ignore_errors: true
+  register: fwd_cmd_state
+
+- name: open firewalld access to port 80
+  become: true
+  firewalld:
+    immediate: true
+    permanent: true
+    port: "8080/tcp"
+    state: enabled
+  when: "fwd_cmd_state.stdout == 'running'"
+
+- name: open iptables access to port 80
+  become: true
+  iptables:
+    action: insert
+    chain: INPUT
+    comment: "OCP Edge: Access to web-cache"
+    ip_version: ipv4
+    protocol: tcp
+    destination_port: 8080
+    destination: "{{ item|ipaddr('host') }}"
+  loop: "{{ hostvars[inventory_hostname]['ansible_facts']['all_' + ip_version + '_addresses'] }}"
+  when: "fwd_cmd_state.stdout != 'running'"

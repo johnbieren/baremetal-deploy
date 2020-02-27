@@ -1,0 +1,40 @@
+- name: adjust {{ ansible_facts[img_prefix + '_image_name'] }}
+  shell: |
+    UNCOMPRESSED_IMAGE=$(echo {{ ansible_facts[img_prefix + '_image_name'] }} | sed s/.gz//)
+    gunzip -f {{ ansible_facts[img_prefix + '_image_name'] }}
+    {% if 'bootstrap' in img_prefix %}
+    virt-edit -a $UNCOMPRESSED_IMAGE -m /dev/sda1 -e "s/ip=dhcp/ip=ens3:dhcp6/g" /grub2/grub.cfg
+    {% else %}
+    virt-edit -a $UNCOMPRESSED_IMAGE -m /dev/sda1 -e "s/ip=dhcp/ip={% if int_if == 'eno2' %}eno2{% else %}enp5s0{% endif %}:dhcp6/g" /grub2/grub.cfg
+    {% endif %}
+  args:
+      chdir: "{{ caching_dir }}"
+
+- name: calculate sha256 hash for uncompressed {{ ansible_facts[img_prefix + '_image_name'] }}
+  shell: |
+    UNCOMPRESSED_IMAGE=$(echo {{ ansible_facts[img_prefix + '_image_name'] }} | sed s/.gz//)
+    sha256sum {{ caching_dir }}/$UNCOMPRESSED_IMAGE | awk '{ print $1 }'
+  register: uncompressed_sha256_moiin
+
+- name: compress {{ ansible_facts[img_prefix + '_image_name'] }}
+  shell: |
+    UNCOMPRESSED_IMAGE=$(echo {{ ansible_facts[img_prefix + '_image_name'] }} | sed s/.gz//)
+    gzip $UNCOMPRESSED_IMAGE
+  args:
+      chdir: "{{ caching_dir }}"
+
+- name: set machine_os_installer_bootstrap_image_uncompressed_sha256
+  lineinfile:
+    dest: "{{ caching_dir }}/uncompressed_image_sha256.yaml"
+    line: "ipv6_machine_os_installer_bootstrap_image_uncompressed_sha256: {{ uncompressed_sha256_moiin.stdout }}"
+    create: yes
+    regexp: '^ipv6_machine_os_installer_bootstrap_image_uncompressed_sha256'
+  when: "'bootstrap' in img_prefix"
+
+- name: set machine_os_installer_image_uncompressed_sha256
+  lineinfile:
+    dest: "{{ caching_dir }}/uncompressed_image_sha256.yaml"
+    line: "ipv6_machine_os_installer_image_uncompressed_sha256: {{ uncompressed_sha256_moiin.stdout }}"
+    create: yes
+    regexp: '^ipv6_machine_os_installer_image_uncompressed_sha256'
+  when: "'bootstrap' not in img_prefix"

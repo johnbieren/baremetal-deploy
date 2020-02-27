@@ -1,0 +1,35 @@
+- name: assert file {{ ansible_facts[img_prefix + '_image_name'] }} exists
+  stat:
+    path: "{{ caching_dir }}/{{ ansible_facts[img_prefix + '_image_name'] }}"
+  register: moiin_exist
+
+- name: calculate sha256 hash for {{ ansible_facts[img_prefix + '_image_name'] }}
+  shell: |
+    sha256sum {{ caching_dir }}/{{ ansible_facts[img_prefix + '_image_name'] }} | \
+      awk '{ print $1 }'
+  register: actual_sha256_moiin
+  when: moiin_exist.stat.exists|bool
+
+- block:
+  - name: download {{ ansible_facts[img_prefix + '_image_name'] }}
+    register: img_download
+    uri:
+      dest: "{{ caching_dir }}/{{ ansible_facts[img_prefix + '_image_name'] }}"
+      group: "{{ ansible_facts['user_id'] }}"
+      owner: "{{ ansible_facts['user_id'] }}"
+      setype: httpd_sys_content_t
+      mode: 0644
+      url: "{{ ansible_facts[img_prefix + '_image_url'] }}"
+      status_code: [200,302,304]
+  when: not moiin_exist.stat.exists|bool
+
+- name: create sha256 file
+  copy:
+    dest: "{{ caching_dir }}/{{ ansible_facts[img_prefix + '_image_name'] }}.sha256sum"
+    group: "{{ ansible_facts['user_id'] }}"
+    owner: "{{ ansible_facts['user_id'] }}"
+    setype: httpd_sys_content_t
+    mode: 0644
+    force: yes
+    content: |
+      {{ ansible_facts[img_prefix + '_image_sha256'] }} {{ ansible_facts[img_prefix + '_image_name'] }}

@@ -1,0 +1,147 @@
+---
+- name: install packages for container registry
+  become: true
+  package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - 'jq'
+    - 'podman'
+    - 'httpd-tools'
+    - 'python3-firewall'
+    - 'libguestfs-tools-c'
+
+- name: create registry directories
+  become: true
+  file:
+    path: "{{ item }}"
+    owner: "{{ ansible_facts['user_id'] }}"
+    group: "{{ ansible_facts['user_id'] }}"
+    mode: 0755
+    state: directory
+  loop:
+    - "{{ registry_dir }}"
+    - "{{ registry_dir }}/auth"
+    - "{{ registry_dir }}/certs"
+    - "{{ registry_dir }}/data"
+
+- name: set registry facts
+  set_fact:
+    ssl_host_name: "{{ ansible_facts['fqdn'] }}"
+    ssl_host_name_short: "{{ ansible_facts['hostname'] }}"
+
+- name: assert registry private key exists
+  stat:
+    path: "{{ registry_dir }}/certs/registry.key"
+  register: privkey_exists
+
+- name: generate private key(if does not exist)
+  openssl_privatekey:
+    owner: "{{ ansible_facts['user_id'] }}"
+    path: "{{ registry_dir }}/certs/registry.key"
+    size: 2048
+    state: present
+  when: not privkey_exists.stat.exists|bool
+
+- name: assert registry cert exists
+  stat:
+    path: "{{ registry_dir }}/certs/registry.crt"
+  register: cert_exists
+
+- name: create registry cert
+  block:
+    - name: create temporary openssl.conf
+      tempfile:
+        state: file
+        suffix: registry_openssl_conf
+      register: openssl_conf
+
+    - name: create openssl.conf
+      template:
+        src: openssl.conf.j2
+        dest: "{{ openssl_conf.path }}"
+
+    - name: generate ssl certificate
+      shell: |
+        openssl req -x509 \
+            -key {{registry_dir}}/certs/registry.key \
+            -out  {{registry_dir}}/certs/registry.crt \
+            -days 365 \
+            -config {{ openssl_conf.path }} \
+            -extensions SAN \
+            -subj "/C=US/ST=NC/L=Raleigh/O=Test Company/OU=Testing/CN={{ ssl_host_name }}"
+  when: not cert_exists.stat.exists|bool
+
+- name: create {{ registry_user }} creds
+  command: |
+    htpasswd -bBc {{ registry_dir }}/auth/htpasswd {{ registry_user }} {{ registry_pass }}
+
+- name: copy registry cert to /etc/pki/ca-trust/source/anchors/
+  become: true
+  copy:
+    src: "{{ registry_dir }}/certs/registry.crt"
+    dest: /etc/pki/ca-trust/source/anchors/
+    remote_src: true
+
+- name: update CA trusted store
+  become: true
+  command: update-ca-trust
+
+- name: register registry cert to be used in install-config
+  command: "cat {{ registry_dir }}/certs/registry.crt"
+  register: registry_cert
+
+- name: remove any running registry container
+  become: true
+  shell: |
+    podman rm registry -f || true
+
+- name: start registry container
+  become: true
+  shell: |
+    podman run -d --net host --name registry -p {{ registry_port }}:5000 \
+      -v {{ registry_dir }}/data:/var/lib/registry:z \
+      -v {{ registry_dir }}/auth:/auth:z \
+      -e "REGISTRY_AUTH=htpasswd" \
+      -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
+      -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+      -v {{ registry_dir }}/certs:/certs:z \
+      -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+      -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+      docker.io/registry:latest
+
+- name: assert firewalld status
+  become: true
+  command: firewall-cmd --state
+  ignore_errors: true
+  register: fwd_cmd_state
+
+- name: open firewalld access to port {{ registry_port }}
+  become: true
+  firewalld:
+    immediate: true
+    permanent: true
+    port: "{{ registry_port }}/tcp"
+    state: enabled
+  when: "fwd_cmd_state.stdout == 'running'"
+
+- name: open iptables access to port {{ registry_port }}
+  vars:
+    ip_version: "{{ 'ipv6' if baremetal_net_ipv6|bool else 'ipv4' }}"
+  become: true
+  iptables:
+    action: insert
+    chain: INPUT
+    comment: "OCP Edge: Access to container registry"
+    ip_version: "{{ ip_version }}"
+    protocol: tcp
+    destination_port: "{{ registry_port }}"
+    destination: "{{ item|ipaddr('host') }}"
+  loop: "{{ hostvars[inventory_hostname]['ansible_facts']['all_' + ip_version + '_addresses'] }}"
+  when: "fwd_cmd_state.stdout != 'running'"
+
+- name: fetch registry certificate
+  fetch:
+    src: "{{ registry_dir }}/certs/registry.crt"
+    dest: registry.crt
+    flat: true
